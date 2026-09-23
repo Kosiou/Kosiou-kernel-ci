@@ -343,6 +343,7 @@ jobs:
           # 5.4 qGKI 需要 CROSS_COMPILE（指向 ARM GNU as/ld）+ LLVM=1
           # 根据 ravindu644 教程：5.4 需要 Clang + GCC cross compiler
           export CROSS_COMPILE="$TOOLCHAIN_BIN/aarch64-linux-gnu-"
+          export AS="$TOOLCHAIN_BIN/aarch64-linux-gnu-as"
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
           export CC=clang
@@ -352,6 +353,8 @@ jobs:
           export OBJCOPY=llvm-objcopy
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
+          # 与本地 build_local.sh 对齐；该树的一个旧驱动函数会触发 Clang Werror
+          export KCFLAGS="-Wno-error=unused-function"
 
           # ccache
           if [ -n "${{ inputs.use_ccache }}" ] && command -v ccache &>/dev/null; then
@@ -375,6 +378,8 @@ jobs:
           echo " Version:   $LOCALVERSION"
           echo " CC:        $CLANG_DIR/bin/clang"
           echo " CROSS:     $CROSS_COMPILE"
+          echo " AS:        $AS"
+          echo " KCFLAGS:   $KCFLAGS"
           echo " DTC_EXT:   $DTC_EXT"
           echo " JOBS:      $(nproc)"
           echo " OUT:       $OUT_DIR"
@@ -388,6 +393,8 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             DTC_EXT="$DTC_EXT" \
             LOCALVERSION_AUTO=0 \
+            CONFIG_SECTION_MISMATCH_WARN_ONLY=y \
+            KCFLAGS="$KCFLAGS" \
             LLVM=1 \
             CC=clang \
             LD=ld.lld \
@@ -401,6 +408,8 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             DTC_EXT="$DTC_EXT" \
             LOCALVERSION_AUTO=0 \
+            CONFIG_SECTION_MISMATCH_WARN_ONLY=y \
+            KCFLAGS="$KCFLAGS" \
             LLVM=1 \
             CC=clang \
             LD=ld.lld \
