@@ -124,21 +124,30 @@ jobs:
 
           CLANG_OK=false
           GCC_OK=false
+          GCC_BIN=""
+          GCC_PREFIX=""
 
           # 检查是否已有
           if [ -x "$CLANG_DIR/bin/clang" ]; then
             echo "发现本地 clang: $CLANG_DIR/bin/clang"
             CLANG_OK=true
           fi
-          if [ -x "$GCC_DIR/bin/aarch64-linux-gnu-as" ]; then
-            echo "发现本地 gcc: $GCC_DIR"
+          FOUND_GCC=$(find "$TOOLCHAIN_BASE" -type f -perm -111 \
+            -name 'aarch64-linux-gnu-as' -print -quit 2>/dev/null)
+          if [ -z "$FOUND_GCC" ]; then
+            FOUND_GCC=$(find "$TOOLCHAIN_BASE" -type f -perm -111 \
+              -name 'aarch64-none-linux-gnu-as' -print -quit 2>/dev/null)
+          fi
+          if [ -n "$FOUND_GCC" ]; then
+            GCC_BIN=$(dirname "$FOUND_GCC")
+            GCC_PREFIX=$(basename "$FOUND_GCC" | sed 's/as$//')
+            GCC_DIR=$(dirname "$GCC_BIN")
+            echo "发现本地 gcc: $GCC_BIN/${GCC_PREFIX}as"
             GCC_OK=true
           fi
 
           if [ "$CLANG_OK" = true ] && [ "$GCC_OK" = true ]; then
             echo "工具链已存在，跳过下载"
-            echo "FOUND=true" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
 
           # 下载 clang-r416183b
@@ -172,11 +181,18 @@ jobs:
             curl -Lf --progress-bar "$GCC_URL" -o gcc.tar.xz
             tar xJf gcc.tar.xz
             rm -f gcc.tar.xz
-            # ARM GNU toolchain 解压后目录名包含版本信息
-            FOUND_GCC=$(find "$TOOLCHAIN_BASE" -name "aarch64-linux-gnu-as" -type f 2>/dev/null | head -1)
+            # ARM GNU toolchain 可能使用 aarch64-linux-gnu 或 aarch64-none-linux-gnu 前缀
+            FOUND_GCC=$(find "$TOOLCHAIN_BASE" -type f -perm -111 \
+              -name 'aarch64-linux-gnu-as' -print -quit 2>/dev/null)
+            if [ -z "$FOUND_GCC" ]; then
+              FOUND_GCC=$(find "$TOOLCHAIN_BASE" -type f -perm -111 \
+                -name 'aarch64-none-linux-gnu-as' -print -quit 2>/dev/null)
+            fi
             if [ -n "$FOUND_GCC" ]; then
-              GCC_DIR=$(dirname "$(dirname "$FOUND_GCC")")
-              echo "gcc 定位: $GCC_DIR"
+              GCC_BIN=$(dirname "$FOUND_GCC")
+              GCC_PREFIX=$(basename "$FOUND_GCC" | sed 's/as$//')
+              GCC_DIR=$(dirname "$GCC_BIN")
+              echo "gcc 定位: $GCC_BIN/${GCC_PREFIX}as"
               GCC_OK=true
             fi
           fi
@@ -188,6 +204,8 @@ jobs:
 
           echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
           echo "GCC_DIR=$GCC_DIR" >> "$GITHUB_ENV"
+          echo "GCC_BIN=$GCC_BIN" >> "$GITHUB_ENV"
+          echo "GCC_PREFIX=$GCC_PREFIX" >> "$GITHUB_ENV"
           echo "FOUND=true" >> "$GITHUB_OUTPUT"
 
       # ── 建立 toolchain 软链接 ────────────────────────────────────
@@ -195,6 +213,8 @@ jobs:
         run: |
           CLANG_DIR="${{ env.CLANG_DIR }}"
           GCC_DIR="${{ env.GCC_DIR }}"
+          GCC_BIN="${{ env.GCC_BIN }}"
+          GCC_PREFIX="${{ env.GCC_PREFIX }}"
           TOOLCHAIN_BIN="$GITHUB_WORKSPACE/kernel/toolchain/bin"
           mkdir -p "$TOOLCHAIN_BIN"
 
@@ -217,14 +237,10 @@ jobs:
           echo "Clang: $CLANG"
           $CLANG --version | head -1
 
-          # 找 ARM GNU as/ld
-          if [ -x "$GCC_DIR/aarch64-linux-gnu/bin/aarch64-linux-gnu-as" ]; then
-            GCC_BIN="$GCC_DIR/aarch64-linux-gnu/bin"
-          elif [ -x "$GCC_DIR/bin/aarch64-linux-gnu-as" ]; then
-            GCC_BIN="$GCC_DIR/bin"
-          else
-            GCC_BIN=""
-            echo "::warning::未找到 ARM GNU toolchain，使用 clang integrated assembler"
+          # 找 ARM GNU as/ld，并统一暴露为内核使用的 aarch64-linux-gnu 前缀
+          if [ -z "$GCC_BIN" ] || [ -z "$GCC_PREFIX" ] || [ ! -x "$GCC_BIN/${GCC_PREFIX}as" ]; then
+            echo "::error::未找到 ARM GNU assembler"
+            exit 1
           fi
 
           # 建立 aarch64 前缀链接
@@ -242,10 +258,8 @@ jobs:
           [ -x "$CLANG_DIR/bin/llvm-ar" ] && ln -sf "$CLANG_DIR/bin/llvm-ar" "$TOOLCHAIN_BIN/aarch64-linux-gnu-ar"
 
           # GNU as（5.4 内核需要外部 assembler）
-          if [ -n "$GCC_BIN" ] && [ -x "$GCC_BIN/aarch64-linux-gnu-as" ]; then
-            ln -sf "$GCC_BIN/aarch64-linux-gnu-as" "$TOOLCHAIN_BIN/aarch64-linux-gnu-as"
-            echo "GNU as: $GCC_BIN/aarch64-linux-gnu-as"
-          fi
+          ln -sf "$GCC_BIN/${GCC_PREFIX}as" "$TOOLCHAIN_BIN/aarch64-linux-gnu-as"
+          echo "GNU as: $GCC_BIN/${GCC_PREFIX}as"
 
           echo "toolchain/bin:"
           ls -la "$TOOLCHAIN_BIN"
@@ -318,6 +332,10 @@ jobs:
             fi
           done
 
+          # 禁止自动追加 Git dirty/version 后缀，避免 utsrelease 超过 64 字符
+          sed -i '/^CONFIG_LOCALVERSION_AUTO=/d' "$DEFCONFIG"
+          echo "CONFIG_LOCALVERSION_AUTO=n" >> "$DEFCONFIG"
+
           echo "── 关键配置 ──"
           grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG"
 
@@ -347,7 +365,7 @@ jobs:
 
           # 5.4 qGKI 需要 CROSS_COMPILE（指向 ARM GNU as/ld）+ LLVM=1
           # 根据 ravindu644 教程：5.4 需要 Clang + GCC cross compiler
-          export CROSS_COMPILE="${{ env.GCC_DIR }}/bin/aarch64-linux-gnu-"
+          export CROSS_COMPILE="$TOOLCHAIN_BIN/aarch64-linux-gnu-"
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
           export CC=clang
@@ -392,6 +410,7 @@ jobs:
             CROSS_COMPILE="$CROSS_COMPILE" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             DTC_EXT="$DTC_EXT" \
+            LOCALVERSION_AUTO=0 \
             LLVM=1 \
             CC=clang \
             LD=ld.lld \
@@ -404,6 +423,7 @@ jobs:
             CROSS_COMPILE="$CROSS_COMPILE" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             DTC_EXT="$DTC_EXT" \
+            LOCALVERSION_AUTO=0 \
             LLVM=1 \
             CC=clang \
             LD=ld.lld \
