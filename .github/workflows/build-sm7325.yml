@@ -117,31 +117,23 @@ jobs:
       - name: 下载工具链
         id: toolchain
         run: |
-          CLANG_DIR="$TOOLCHAIN_BASE/clang-r416183b"
-          GCC_DIR="$TOOLCHAIN_BASE/arm-gnu-14.2"
+          # clang 压缩包直接包含 bin/，解压根目录就是 TOOLCHAIN_BASE
+          CLANG_DIR="$TOOLCHAIN_BASE"
+          GCC_DIR="$TOOLCHAIN_BASE/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu"
           CLANG_URL="https://github.com/ravindu644/Android-Kernel-Tutorials/releases/download/toolchains/clang-r416183b.tar.gz"
           GCC_URL="https://github.com/ravindu644/Android-Kernel-Tutorials/releases/download/toolchains/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu.tar.xz"
 
           CLANG_OK=false
           GCC_OK=false
-          GCC_BIN=""
-          GCC_PREFIX=""
+          GCC_BIN="$GCC_DIR/bin"
+          GCC_PREFIX="aarch64-none-linux-gnu-"
 
           # 检查是否已有
           if [ -x "$CLANG_DIR/bin/clang" ]; then
             echo "发现本地 clang: $CLANG_DIR/bin/clang"
             CLANG_OK=true
           fi
-          FOUND_GCC=$(find "$TOOLCHAIN_BASE" -type f -perm -111 \
-            -name 'aarch64-linux-gnu-as' -print -quit 2>/dev/null)
-          if [ -z "$FOUND_GCC" ]; then
-            FOUND_GCC=$(find "$TOOLCHAIN_BASE" -type f -perm -111 \
-              -name 'aarch64-none-linux-gnu-as' -print -quit 2>/dev/null)
-          fi
-          if [ -n "$FOUND_GCC" ]; then
-            GCC_BIN=$(dirname "$FOUND_GCC")
-            GCC_PREFIX=$(basename "$FOUND_GCC" | sed 's/as$//')
-            GCC_DIR=$(dirname "$GCC_BIN")
+          if [ -x "$GCC_BIN/${GCC_PREFIX}as" ]; then
             echo "发现本地 gcc: $GCC_BIN/${GCC_PREFIX}as"
             GCC_OK=true
           fi
@@ -161,15 +153,6 @@ jobs:
             if [ -x "$CLANG_DIR/bin/clang" ]; then
               echo "clang 下载成功: $CLANG_DIR/bin/clang"
               CLANG_OK=true
-            else
-              echo "::warning::clang 解压后目录名可能不同，尝试自动定位"
-              # clang-r416183b 解压后可能是 clang-r416183b/ 或直接在顶层
-              FOUND_CLANG=$(find "$TOOLCHAIN_BASE" -name "clang" -type f 2>/dev/null | head -1)
-              if [ -n "$FOUND_CLANG" ]; then
-                CLANG_DIR=$(dirname "$(dirname "$FOUND_CLANG")")
-                echo "自动定位 clang: $CLANG_DIR"
-                CLANG_OK=true
-              fi
             fi
           fi
 
@@ -181,17 +164,7 @@ jobs:
             curl -Lf --progress-bar "$GCC_URL" -o gcc.tar.xz
             tar xJf gcc.tar.xz
             rm -f gcc.tar.xz
-            # ARM GNU toolchain 可能使用 aarch64-linux-gnu 或 aarch64-none-linux-gnu 前缀
-            FOUND_GCC=$(find "$TOOLCHAIN_BASE" -type f -perm -111 \
-              -name 'aarch64-linux-gnu-as' -print -quit 2>/dev/null)
-            if [ -z "$FOUND_GCC" ]; then
-              FOUND_GCC=$(find "$TOOLCHAIN_BASE" -type f -perm -111 \
-                -name 'aarch64-none-linux-gnu-as' -print -quit 2>/dev/null)
-            fi
-            if [ -n "$FOUND_GCC" ]; then
-              GCC_BIN=$(dirname "$FOUND_GCC")
-              GCC_PREFIX=$(basename "$FOUND_GCC" | sed 's/as$//')
-              GCC_DIR=$(dirname "$GCC_BIN")
+            if [ -x "$GCC_BIN/${GCC_PREFIX}as" ]; then
               echo "gcc 定位: $GCC_BIN/${GCC_PREFIX}as"
               GCC_OK=true
             fi
@@ -199,6 +172,10 @@ jobs:
 
           if [ "$CLANG_OK" = false ]; then
             echo "::error::clang-r416183b 下载失败"
+            exit 1
+          fi
+          if [ "$GCC_OK" = false ]; then
+            echo "::error::ARM GNU toolchain 下载失败"
             exit 1
           fi
 
