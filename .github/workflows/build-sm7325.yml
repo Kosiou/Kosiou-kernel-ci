@@ -76,7 +76,7 @@ jobs:
       - name: 安装编译依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y bison flex libelf-dev dwarves cpio unzip \
+          sudo apt-get install -y bison flex libelf-dev dwarves cpio unzip zip binutils \
             bc libssl-dev python3 ccache git
 
       # ── GNU Make 4.3（5.4 内核要求）──────────────────────────────
@@ -130,7 +130,7 @@ jobs:
             echo "发现本地 clang: $CLANG_DIR/bin/clang"
             CLANG_OK=true
           fi
-          if [ -x "$GCC_DIR/aarch64-linux-gnu/bin/aarch64-linux-gnu-as" ]; then
+          if [ -x "$GCC_DIR/bin/aarch64-linux-gnu-as" ]; then
             echo "发现本地 gcc: $GCC_DIR"
             GCC_OK=true
           fi
@@ -260,7 +260,6 @@ jobs:
             git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git "$KERNEL_ROOT/KernelSU"
           fi
           cd "$KERNEL_ROOT/KernelSU"
-          git checkout main
           cd "$KERNEL_ROOT"
 
           DRIVER_DIR="$KERNEL_ROOT/drivers"
@@ -293,10 +292,16 @@ jobs:
           KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
           DEFCONFIG="$KERNEL_ROOT/arch/arm64/configs/vendor/gts7fewifi_eur_open_defconfig"
 
-          # 确保 CONFIG_USER_NS=y
-          if ! grep -q "^CONFIG_USER_NS=y" "$DEFCONFIG"; then
+          # 按 workflow 输入控制 CONFIG_USER_NS
+          if [ "${{ inputs.enable_userns }}" = "true" ] && ! grep -q "^CONFIG_USER_NS=y" "$DEFCONFIG"; then
             sed -i '/^CONFIG_NAMESPACES=y$/a CONFIG_USER_NS=y' "$DEFCONFIG"
             echo "已添加 CONFIG_USER_NS=y"
+          fi
+
+          # 确保生成 ARM64 device tree overlay
+          if ! grep -q "^CONFIG_BUILD_ARM64_DT_OVERLAY=y" "$DEFCONFIG"; then
+            echo "CONFIG_BUILD_ARM64_DT_OVERLAY=y" >> "$DEFCONFIG"
+            echo "已添加 CONFIG_BUILD_ARM64_DT_OVERLAY=y"
           fi
 
           # 确保 KSU 配置存在
@@ -338,10 +343,11 @@ jobs:
 
           export PATH="$TOOLCHAIN_BIN:$CLANG_DIR/bin:$PATH"
           export ARCH=arm64
+          export DTC_EXT="$KERNEL_ROOT/tools/dtc"
 
           # 5.4 qGKI 需要 CROSS_COMPILE（指向 ARM GNU as/ld）+ LLVM=1
           # 根据 ravindu644 教程：5.4 需要 Clang + GCC cross compiler
-          export CROSS_COMPILE="${{ env.GCC_DIR }}/aarch64-linux-gnu/bin/aarch64-linux-gnu-"
+          export CROSS_COMPILE="${{ env.GCC_DIR }}/bin/aarch64-linux-gnu-"
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
           export CC=clang
@@ -374,6 +380,7 @@ jobs:
           echo " Version:   $LOCALVERSION"
           echo " CC:        $CLANG_DIR/bin/clang"
           echo " CROSS:     $CROSS_COMPILE"
+          echo " DTC_EXT:   $DTC_EXT"
           echo " JOBS:      $(nproc)"
           echo " OUT:       $OUT_DIR"
           echo "=============================================="
@@ -384,6 +391,7 @@ jobs:
             ARCH=arm64 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
+            DTC_EXT="$DTC_EXT" \
             LLVM=1 \
             CC=clang \
             LD=ld.lld \
@@ -395,6 +403,7 @@ jobs:
             ARCH=arm64 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
+            DTC_EXT="$DTC_EXT" \
             LLVM=1 \
             CC=clang \
             LD=ld.lld \
