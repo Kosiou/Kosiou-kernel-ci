@@ -11,16 +11,12 @@ on:
           - none
         default: reukisu
       build_variant:
-        description: "构建变体"
+        description: "构建变体（resukisu=KSU 内建, lkm=KSU 编为模块）"
         type: choice
         options:
           - resukisu
           - lkm
         default: resukisu
-      enable_userns:
-        description: "启用 CONFIG_USER_NS"
-        type: boolean
-        default: true
       use_ccache:
         description: "启用 ccache"
         type: boolean
@@ -48,7 +44,7 @@ env:
 
 jobs:
   build:
-    name: "SM7325-${{ inputs.build_variant || 'resukisu' }}${{ inputs.ksu_variant == 'reukisu' && '-KSU' || '' }}"
+    name: "SM7325-${{ inputs.build_variant || 'resukisu' }}${{ inputs.ksu_variant == 'reukisu' && (inputs.build_variant == 'lkm' && '-KSU-lkm' || '-KSU') || '-noKSU' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -79,18 +75,29 @@ jobs:
           sudo apt-get install -y bison flex libelf-dev dwarves cpio unzip zip binutils \
             bc libssl-dev python3 ccache git
 
-      # ── GNU Make 4.3（5.4 内核要求）──────────────────────────────
-      - name: 安装 GNU Make 4.3
+      # ── GNU Make 4.3（5.4 内核要求 < 4.4）────────────────────────
+      # ubuntu-latest (24.04) 自带 4.3, 仅在系统 make >= 4.4 时才编译
+      - name: 安装 GNU Make 4.3（仅系统版本过新时）
         run: |
-          cd /tmp
-          curl -fsSL https://ftp.gnu.org/gnu/make/make-4.3.tar.gz -o make.tar.gz
-          tar xzf make.tar.gz
-          cd make-4.3
-          ./configure --prefix=/usr/local
-          make -j"$(nproc)"
-          sudo make install
-          /usr/local/bin/make --version | head -1
-          echo "PATH=/usr/local/bin:$PATH" >> "$GITHUB_ENV"
+          SYSTEM_MAJOR=$(make --version | head -1 | grep -oE '[0-9]+\.[0-9]+')
+          NEED_BUILD=false
+          if dpkg --compare-versions "$SYSTEM_MAJOR" ge "4.4"; then
+            NEED_BUILD=true
+          fi
+          if [ "$NEED_BUILD" = true ]; then
+            echo "系统 make $SYSTEM_MAJOR 过新, 编译 4.3..."
+            cd /tmp
+            curl -fsSL https://ftp.gnu.org/gnu/make/make-4.3.tar.gz -o make.tar.gz
+            tar xzf make.tar.gz
+            cd make-4.3
+            ./configure --prefix=/usr/local
+            make -j"$(nproc)"
+            sudo make install
+            echo "PATH=/usr/local/bin:$PATH" >> "$GITHUB_ENV"
+            /usr/local/bin/make --version | head -1
+          else
+            echo "系统 make $SYSTEM_MAJOR 可用, 跳过"
+          fi
 
       # ── ccache ────────────────────────────────────────────────────
       - name: 配置 ccache
@@ -106,7 +113,10 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: sm7325-ccache-${{ inputs.build_variant }}-${{ hashFiles('kernel/arch/arm64/configs/vendor/gts7fewifi_eur_open_defconfig') }}
+          # 固定 key: hashFiles 在 workflow 解析期求值, kernel/ 尚未克隆, 恒为空
+          # defconfig 变化不会使缓存失效 — 由 restore-keys 兜底, 手动清缓存可走
+          # Actions → Caches 页面删除
+          key: sm7325-ccache-${{ inputs.build_variant }}-${{ inputs.ksu_variant }}
           restore-keys: |
             sm7325-ccache-${{ inputs.build_variant }}-
             sm7325-ccache-
@@ -138,16 +148,12 @@ jobs:
             GCC_OK=true
           fi
 
-          if [ "$CLANG_OK" = true ] && [ "$GCC_OK" = true ]; then
-            echo "工具链已存在，跳过下载"
-          fi
-
           # 下载 clang-r416183b
           if [ "$CLANG_OK" = false ]; then
             echo "下载 clang-r416183b..."
             mkdir -p "$TOOLCHAIN_BASE"
             cd "$TOOLCHAIN_BASE"
-            curl -Lf --progress-bar "$CLANG_URL" -o clang.tar.gz
+            curl -Lf --retry 3 --progress-bar "$CLANG_URL" -o clang.tar.gz
             tar xzf clang.tar.gz
             rm -f clang.tar.gz
             if [ -x "$CLANG_DIR/bin/clang" ]; then
@@ -161,7 +167,7 @@ jobs:
             echo "下载 ARM GNU toolchain 14.2..."
             mkdir -p "$TOOLCHAIN_BASE"
             cd "$TOOLCHAIN_BASE"
-            curl -Lf --progress-bar "$GCC_URL" -o gcc.tar.xz
+            curl -Lf --retry 3 --progress-bar "$GCC_URL" -o gcc.tar.xz
             tar xJf gcc.tar.xz
             rm -f gcc.tar.xz
             if [ -x "$GCC_BIN/${GCC_PREFIX}as" ]; then
@@ -241,41 +247,46 @@ jobs:
           echo "toolchain/bin:"
           ls -la "$TOOLCHAIN_BIN"
 
-      # ── 集成 KernelSU (ReSukiSU) ─────────────────────────────────
-      - name: 集成 KernelSU (ReSukiSU)
-        if: inputs.ksu_variant == 'reukisu'
+      # ── 集成 KernelSU (BakaSU, 原 ReSukiSU) ──────────────────────
+      # reukisu:  克隆 BakaSU 并链接为内建/LKM 驱动
+      # none:     内核树 drivers/Kconfig 已 source drivers/kernelsu/Kconfig
+      #           (符号链接悬空时 Kconfig 直接 exit(1)), 必须摘掉这两处引用
+      - name: 集成 KernelSU (BakaSU)
         run: |
           KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
-          echo "克隆 ReSukiSU..."
-          if [ ! -d "$KERNEL_ROOT/KernelSU" ]; then
-            git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git "$KERNEL_ROOT/KernelSU"
-          fi
-          cd "$KERNEL_ROOT/KernelSU"
-          cd "$KERNEL_ROOT"
-
           DRIVER_DIR="$KERNEL_ROOT/drivers"
-          KSU_KERNEL_DIR="$KERNEL_ROOT/KernelSU/kernel"
 
-          # 创建驱动链接
-          if [ ! -L "$DRIVER_DIR/kernelsu" ]; then
-            ln -sf "../../KernelSU/kernel" "$DRIVER_DIR/kernelsu"
+          if [ "${{ inputs.ksu_variant }}" = "reukisu" ]; then
+            echo "克隆 BakaSU (原 ReSukiSU)..."
+            if [ ! -d "$KERNEL_ROOT/KernelSU" ]; then
+              git clone --depth=1 https://github.com/Baka-SU/BakaSU.git "$KERNEL_ROOT/KernelSU"
+            fi
+            KSU_KERNEL_DIR="$KERNEL_ROOT/KernelSU/kernel"
+
+            # 创建驱动链接（覆盖树里可能存在的死链接）
+            ln -sfn "../../KernelSU/kernel" "$DRIVER_DIR/kernelsu"
             echo "已创建 drivers/kernelsu -> KernelSU/kernel"
-          fi
 
-          # 确保 Makefile 包含 KSU
-          if ! grep -q "kernelsu" "$DRIVER_DIR/Makefile"; then
-            echo '' >> "$DRIVER_DIR/Makefile"
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> "$DRIVER_DIR/Makefile"
-            echo "已添加 KSU 到 drivers/Makefile"
-          fi
+            # 确保 Makefile 包含 KSU
+            if ! grep -q "kernelsu" "$DRIVER_DIR/Makefile"; then
+              echo '' >> "$DRIVER_DIR/Makefile"
+              echo 'obj-$(CONFIG_KSU) += kernelsu/'
+              echo "已添加 KSU 到 drivers/Makefile"
+            fi
 
-          # 确保 Kconfig 包含 KSU
-          if ! grep -q "drivers/kernelsu/Kconfig" "$DRIVER_DIR/Kconfig"; then
-            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
-            echo "已添加 KSU 到 drivers/Kconfig"
-          fi
+            # 确保 Kconfig 包含 KSU
+            if ! grep -q "drivers/kernelsu/Kconfig" "$DRIVER_DIR/Kconfig"; then
+              sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
+              echo "已添加 KSU 到 drivers/Kconfig"
+            fi
 
-          echo "KernelSU 集成完成"
+            echo "KernelSU 集成完成"
+          else
+            echo "ksu_variant=none: 摘除 drivers 树里的 KSU 引用（避免悬空 source 导致 Kconfig 退出）"
+            sed -i '/source "drivers\/kernelsu\/Kconfig"/d' "$DRIVER_DIR/Kconfig"
+            sed -i '/obj-$(CONFIG_KSU) += kernelsu\//d' "$DRIVER_DIR/Makefile"
+            echo "已摘除 KSU 引用"
+          fi
 
       # ── 配置内核选项 ─────────────────────────────────────────────
       - name: 配置内核选项
@@ -283,8 +294,8 @@ jobs:
           KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
           DEFCONFIG="$KERNEL_ROOT/arch/arm64/configs/vendor/gts7fewifi_eur_open_defconfig"
 
-          # 按 workflow 输入控制 CONFIG_USER_NS
-          if [ "${{ inputs.enable_userns }}" = "true" ] && ! grep -q "^CONFIG_USER_NS=y" "$DEFCONFIG"; then
+          # USER_NS 已固化进 defconfig; 此处仅作兜底（幂等）
+          if ! grep -q "^CONFIG_USER_NS=y" "$DEFCONFIG"; then
             sed -i '/^CONFIG_NAMESPACES=y$/a CONFIG_USER_NS=y' "$DEFCONFIG"
             echo "已添加 CONFIG_USER_NS=y"
           fi
@@ -295,26 +306,36 @@ jobs:
             echo "已添加 CONFIG_BUILD_ARM64_DT_OVERLAY=y"
           fi
 
-          # 确保 KSU 配置存在
-          for opt in \
-            "CONFIG_KSU=y" \
-            "CONFIG_KSU_MANUAL_HOOK=y" \
-            "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" \
-            "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" \
-            "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"; do
-            cfg="${opt%%=*}"
-            if ! grep -q "^${cfg}=" "$DEFCONFIG"; then
-              echo "$opt" >> "$DEFCONFIG"
-              echo "已添加 $opt"
-            fi
-          done
+          VARIANT="${{ inputs.build_variant || 'resukisu' }}"
+          if [ "${{ inputs.ksu_variant }}" = "reukisu" ]; then
+            # KSU 主开关: resukisu 内建(=y), lkm 编为模块(=m)
+            KSU_VAL="y"
+            [ "$VARIANT" = "lkm" ] && KSU_VAL="m"
+            for opt in \
+              "CONFIG_KSU=${KSU_VAL}" \
+              "CONFIG_KSU_MANUAL_HOOK=y" \
+              "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" \
+              "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" \
+              "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"; do
+              cfg="${opt%%=*}"
+              val="${opt#*=}"
+              # 先删除同符号旧行再追加, 避免重复/冲突
+              sed -i "/^${cfg}=/d" "$DEFCONFIG"
+              echo "$cfg=$val" >> "$DEFCONFIG"
+            done
+            echo "KSU 变体: $VARIANT → CONFIG_KSU=${KSU_VAL}"
+          else
+            # 无 KSU: 清掉 KSU 配置, 防止残留 =y 引用已摘除的代码
+            sed -i '/^CONFIG_KSU/d' "$DEFCONFIG"
+            echo "已清除全部 CONFIG_KSU* 配置"
+          fi
 
           # 禁止自动追加 Git dirty/version 后缀，避免 utsrelease 超过 64 字符
           sed -i '/^CONFIG_LOCALVERSION_AUTO=/d' "$DEFCONFIG"
           echo "CONFIG_LOCALVERSION_AUTO=n" >> "$DEFCONFIG"
 
           echo "── 关键配置 ──"
-          grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG"
+          grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG" || true
 
       # ── 准备 AnyKernel3 ──────────────────────────────────────────
       - name: 准备 AnyKernel3
@@ -338,7 +359,6 @@ jobs:
 
           export PATH="$TOOLCHAIN_BIN:$CLANG_DIR/bin:$PATH"
           export ARCH=arm64
-          export DTC_EXT="$KERNEL_ROOT/tools/dtc"
 
           # 5.4 qGKI 需要 CROSS_COMPILE（指向 ARM GNU as/ld）+ LLVM=1
           # 根据 ravindu644 教程：5.4 需要 Clang + GCC cross compiler
@@ -346,7 +366,6 @@ jobs:
           export AS="$TOOLCHAIN_BIN/aarch64-linux-gnu-as"
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
-          export CC=clang
           export LD=ld.lld
           export AR=llvm-ar
           export NM=llvm-nm
@@ -356,17 +375,21 @@ jobs:
           # 与本地 build_local.sh 对齐；该树的一个旧驱动函数会触发 Clang Werror
           export KCFLAGS="-Wno-error=unused-function"
 
-          # ccache
-          if [ -n "${{ inputs.use_ccache }}" ] && command -v ccache &>/dev/null; then
+          # ccache: 不在 make 命令行传 CC, 让 export 的包装生效
+          # (make 命令行变量会覆盖环境变量; LLVM=1 下 make 默认 CC=clang,
+          #  命令行不传 CC 时 export 的 "ccache clang" 能生效)
+          VARIANT="${{ inputs.build_variant || 'resukisu' }}"
+          if [ "${{ inputs.use_ccache }}" = "true" ] && command -v ccache &>/dev/null; then
             export CC="ccache clang"
-            echo "ccache 已启用"
+            echo "ccache 已启用: CC=$CC"
+          else
+            export CC=clang
           fi
 
           OUT_DIR="$KERNEL_ROOT/out"
           rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR"
 
-          VARIANT="${{ inputs.build_variant || 'resukisu' }}"
           LOCALVERSION="${{ env.LOCALVERSION_BASE }}-GitHubBuild"
 
           echo "=============================================="
@@ -374,9 +397,9 @@ jobs:
           echo "=============================================="
           echo " Device:    ${{ env.DEVICE_CODENAME }}"
           echo " Defconfig: ${{ env.DEFCONFIG }}"
-          echo " Variant:   $VARIANT"
+          echo " Variant:   $VARIANT (ksu: ${{ inputs.ksu_variant }})"
           echo " Version:   $LOCALVERSION"
-          echo " CC:        $CLANG_DIR/bin/clang"
+          echo " CC:        $CC"
           echo " CROSS:     $CROSS_COMPILE"
           echo " AS:        $AS"
           echo " KCFLAGS:   $KCFLAGS"
@@ -385,35 +408,27 @@ jobs:
           echo " OUT:       $OUT_DIR"
           echo "=============================================="
 
+          MAKE_ARGS=( -j"$(nproc)" -C "$KERNEL_ROOT" O="$OUT_DIR"
+            ARCH=arm64
+            CROSS_COMPILE="$CROSS_COMPILE"
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            DTC_EXT="$KERNEL_ROOT/tools/dtc"
+            LOCALVERSION_AUTO=0
+            CONFIG_SECTION_MISMATCH_WARN_ONLY=y
+            KCFLAGS="$KCFLAGS"
+            LLVM=1
+            LD=ld.lld )
+
           # [1/3] 生成 .config
           echo ""; echo "[1/3] 生成 .config..."
-          make -j"$(nproc)" -C "$KERNEL_ROOT" O="$OUT_DIR" \
-            ARCH=arm64 \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            DTC_EXT="$DTC_EXT" \
-            LOCALVERSION_AUTO=0 \
-            CONFIG_SECTION_MISMATCH_WARN_ONLY=y \
-            KCFLAGS="$KCFLAGS" \
-            LLVM=1 \
-            CC=clang \
-            LD=ld.lld \
-            "${{ env.DEFCONFIG }}"
+          make "${MAKE_ARGS[@]}" "${{ env.DEFCONFIG }}" 2>&1 | tee "$OUT_DIR/build.log"
+          # make 在管道里时 set -e 看不到退出码, 用 PIPESTATUS 检查
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::defconfig 生成失败"; exit 1; }
 
           # [2/3] 编译
           echo ""; echo "[2/3] 编译内核..."
-          make -j"$(nproc)" -C "$KERNEL_ROOT" O="$OUT_DIR" \
-            ARCH=arm64 \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            DTC_EXT="$DTC_EXT" \
-            LOCALVERSION_AUTO=0 \
-            CONFIG_SECTION_MISMATCH_WARN_ONLY=y \
-            KCFLAGS="$KCFLAGS" \
-            LLVM=1 \
-            CC=clang \
-            LD=ld.lld \
-            LOCALVERSION="$LOCALVERSION"
+          make "${MAKE_ARGS[@]}" LOCALVERSION="$LOCALVERSION" 2>&1 | tee -a "$OUT_DIR/build.log"
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::内核编译失败, 见 build.log 末尾:"; tail -80 "$OUT_DIR/build.log"; exit 1; }
 
           # 验证 Image
           IMAGE="$OUT_DIR/arch/arm64/boot/Image"
@@ -446,7 +461,8 @@ jobs:
           fi
 
           TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
-          ZIP_NAME="TabS7FE_Kernel-${VARIANT}-${TIMESTAMP}-GitHub.zip"
+          KSU_TAG="${{ inputs.ksu_variant == 'reukisu' && 'KSU' || 'noKSU' }}"
+          ZIP_NAME="TabS7FE_Kernel-${VARIANT}-${KSU_TAG}-${TIMESTAMP}-GitHub.zip"
           (cd "$AK3_DIR" && zip -r9 "$OUT_DIR/$ZIP_NAME" . -x '.git*' '*.gitignore' 'README*' '*placeholder')
 
           echo ""
@@ -464,14 +480,22 @@ jobs:
       - name: 上传内核 zip
         uses: actions/upload-artifact@v6
         with:
-          name: kernel-${{ inputs.build_variant || 'resukisu' }}
+          name: kernel-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant == 'reukisu' && 'KSU' || 'noKSU' }}
           path: ${{ steps.compile.outputs.ZIP_PATH }}
           retention-days: 14
+
+      - name: 上传构建日志（失败时调试用）
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: buildlog-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant }}
+          path: ${{ github.workspace }}/kernel/out/build.log
+          retention-days: 7
 
       - name: 上传 .config（失败时调试用）
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: config-${{ inputs.build_variant || 'resukisu' }}
+          name: config-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant }}
           path: ${{ github.workspace }}/kernel/out/.config
           retention-days: 7
