@@ -263,9 +263,14 @@ jobs:
             fi
             KSU_KERNEL_DIR="$KERNEL_ROOT/KernelSU/kernel"
 
-            # 创建驱动链接（覆盖树里可能存在的死链接）
-            ln -sfn "../../KernelSU/kernel" "$DRIVER_DIR/kernelsu"
-            echo "已创建 drivers/kernelsu -> KernelSU/kernel"
+            # 树里已提交符号链接 drivers/kernelsu -> ../KernelSU/kernel，
+            # 仅在缺失时重建（注意相对层数：从 drivers/ 出发一层）
+            if [ ! -L "$DRIVER_DIR/kernelsu" ]; then
+              ln -sfn "../KernelSU/kernel" "$DRIVER_DIR/kernelsu"
+              echo "已创建 drivers/kernelsu -> ../KernelSU/kernel"
+            else
+              echo "复用树内链接: $(readlink "$DRIVER_DIR/kernelsu")"
+            fi
 
             # 确保 Makefile 包含 KSU
             if ! grep -q "kernelsu" "$DRIVER_DIR/Makefile"; then
