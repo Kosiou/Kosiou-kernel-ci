@@ -380,9 +380,8 @@ jobs:
           # 与本地 build_local.sh 对齐；该树的一个旧驱动函数会触发 Clang Werror
           export KCFLAGS="-Wno-error=unused-function"
 
-          # ccache: 不在 make 命令行传 CC, 让 export 的包装生效
-          # (make 命令行变量会覆盖环境变量; LLVM=1 下 make 默认 CC=clang,
-          #  命令行不传 CC 时 export 的 "ccache clang" 能生效)
+          # ccache: CC 经 export + make 命令行 DISABLE_WRAPPER=1 CC="$CC"
+          # 传入。wrapper 被禁用后不会拦截 warning, KCFLAGS 保留为双保险
           VARIANT="${{ inputs.build_variant || 'resukisu' }}"
           if [ "${{ inputs.use_ccache }}" = "true" ] && command -v ccache &>/dev/null; then
             export CC="ccache clang"
@@ -422,7 +421,12 @@ jobs:
             CONFIG_SECTION_MISMATCH_WARN_ONLY=y
             KCFLAGS="$KCFLAGS"
             LLVM=1
-            LD=ld.lld )
+            LD=ld.lld
+            # 三星树 Makefile 默认 CC=$(gcc-wrapper.py)，wrapper 会把任何
+            # 未白名单的 warning 升级为 fatal（如 techpack/audio lahaina.c
+            # 的 unused-function）。命令行传 CC 同时关掉 wrapper。
+            DISABLE_WRAPPER=1
+            CC="$CC" )
 
           # [1/3] 生成 .config
           echo ""; echo "[1/3] 生成 .config..."
