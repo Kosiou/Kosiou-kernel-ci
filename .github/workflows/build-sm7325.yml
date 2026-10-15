@@ -501,8 +501,8 @@ jobs:
           path: ${{ github.workspace }}/kernel/out/build.log
           retention-days: 7
 
-      - name: 上传 .config（失败时调试用）
-        if: failure()
+      - name: 上传 .config（始终，用于与 Y 大佬 IKCONFIG 对比排查 CRC）
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: config-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant }}
