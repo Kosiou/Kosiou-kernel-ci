@@ -526,12 +526,17 @@ jobs:
   # ── 配套管理器: 用与内核相同的 BakaSU commit 编 manager APK ──
   # 内核驱动版本号(manager 显示 35229/5)来自 BakaSU main HEAD;
   # 官方 release APK 落后于 main 时就会版本错配, 所以自己编。
+  # 流程照抄官方 build-manager.yml: gradle 裸 APK → Rust 编 ksud →
+  # repack_apk.py 注入 libksud.so + zipalign + 自签
   manager:
     name: "BakaSU-Manager (配套 ${{ inputs.ksu_variant }})"
     runs-on: ubuntu-latest
     needs: build
     if: always() && needs.build.result == 'success' && inputs.ksu_variant == 'reukisu'
-    timeout-minutes: 40
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ./baksu
 
     steps:
       - name: 克隆 BakaSU（锁定内核同款 commit）
@@ -552,20 +557,68 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      - name: 设置 Android SDK/NDK (cargo-ndk 需要)
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 NDK 27 并导出 ANDROID_NDK_HOME
+        run: |
+          sdkmanager --install "ndk;27.0.12077973" >/dev/null 2>&1 || sdkmanager --install "ndk;26.3.11579264"
+          NDK_DIR="$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | head -1)"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK: $NDK_DIR"
+
+      - name: 设置 Rust nightly (aarch64-linux-android)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          targets: aarch64-linux-android
+          components: rust-src
+
+      - name: 安装 cargo-ndk
+        run: cargo install cargo-ndk --locked
+
       - name: 设置 Gradle 缓存
         uses: gradle/actions/setup-gradle@v6
 
-      - name: 编译管理器 APK
+      - name: 编译 ksud (arm64, release)
+        working-directory: ./baksu/userspace/ksud
+        run: |
+          cargo ndk -t aarch64-linux-android -p 26 -r build
+          mkdir -p ../../target/aarch64-linux-android/release
+          cp target/aarch64-linux-android/release/ksud \
+             ../../target/aarch64-linux-android/release/ksud
+
+      - name: 编译管理器 APK（裸包，无 libksud）
         working-directory: ./baksu/manager
         run: |
           ./gradlew assembleRelease -Pcommit="${{ needs.build.outputs.ksu_sha }}" --no-daemon
 
-      - name: 定位并重命名 APK
+      - name: repack 注入 libksud.so 并签名
         run: |
-          APK=$(find baksu/manager/app/build/outputs/apk/release -name "*.apk" | head -1)
-          [ -f "$APK" ] || { echo "::error::APK 未找到"; find baksu/manager/app/build/outputs -type f | head; exit 1; }
-          cp "$APK" ReSukiSU-manager-${{ needs.build.outputs.ksu_sha }}.apk
-          ls -lh ReSukiSU-manager-*.apk
+          APK=$(find manager/app/build/outputs/apk/release -name "*.apk" | head -1)
+          [ -f "$APK" ] || { echo "::error::APK 未找到"; exit 1; }
+          echo "裸 APK: $APK"
+          # 自签 keystore（无 secrets.KEYSTORE，生成临时 key）
+          keytool -genkeypair -alias ksu-key -keyalg RSA -keysize 2048 -validity 3650 \
+            -storepass ksu12345 -keypass ksu12345 \
+            -dname "CN=Kosiou CI" -storetype PKCS12 \
+            -keystore ksu-release.jks
+          python3 repack_apk.py repack \
+            -b release -t release \
+            -K ksu-release.jks -A ksu-key \
+            -P ksu12345 -S ksu12345 \
+            -n "ReSukiSU-manager-${{ needs.build.outputs.ksu_sha }}" \
+            "$APK"
+          ls -lh dist/
+
+      - name: 定位并整理 APK
+        run: |
+          APK=$(find dist -name "*.apk" | head -1)
+          [ -f "$APK" ] || { echo "::error::repack 后 APK 未找到"; exit 1; }
+          cp "$APK" /tmp/final.apk
+          mv /tmp/final.apk "$GITHUB_WORKSPACE/ReSukiSU-manager-${{ needs.build.outputs.ksu_sha }}.apk"
+          ls -lh "$GITHUB_WORKSPACE"/ReSukiSU-manager-*.apk
 
       - name: 上传管理器 APK
         uses: actions/upload-artifact@v6
