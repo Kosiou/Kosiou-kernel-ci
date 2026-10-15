@@ -38,7 +38,7 @@ env:
   KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'main' }}
   DEFCONFIG: vendor/gts7fewifi_eur_open_defconfig
   DEVICE_CODENAME: gts7fewifi
-  LOCALVERSION_BASE: "-qgki-Kokuban-Perica-DYF1"
+  LOCALVERSION_BASE: "-Kosiou"
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   TOOLCHAIN_BASE: ${{ github.workspace }}/toolchains
 
@@ -410,7 +410,7 @@ jobs:
           rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR"
 
-          LOCALVERSION="${{ env.LOCALVERSION_BASE }}-GitHubBuild"
+          LOCALVERSION="${{ env.LOCALVERSION_BASE }}"
 
           echo "=============================================="
           echo " SM7325 Kernel Build"
