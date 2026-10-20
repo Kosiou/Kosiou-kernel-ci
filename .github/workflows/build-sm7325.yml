@@ -36,6 +36,8 @@ permissions:
 env:
   KERNEL_REPO: ${{ github.event.inputs.kernel_repo || 'Kosiou/android_kernel_samsung_sm7325' }}
   KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'main' }}
+  HYBRID_MOUNT_REPO: https://github.com/Hybrid-Mount/meta-hybrid_mount.git
+  HYBRID_MOUNT_COMMIT: 3f364e8251594120f60e4a4b8bf70082f67ed90b
   DEFCONFIG: vendor/gts7fewifi_eur_open_defconfig
   DEVICE_CODENAME: gts7fewifi
   LOCALVERSION_BASE: "-Kosiou"
@@ -302,6 +304,28 @@ jobs:
             echo "已摘除 KSU 引用"
           fi
 
+      # ── 集成 Hybrid Mount VFS ────────────────────────────────────
+      - name: 集成 Hybrid Mount VFS
+        run: |
+          KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
+          SOURCE_DIR="$RUNNER_TEMP/meta-hybrid_mount"
+          mkdir -p "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" init
+          git -C "$SOURCE_DIR" remote add origin "$HYBRID_MOUNT_REPO"
+          git -C "$SOURCE_DIR" fetch --depth=1 origin "$HYBRID_MOUNT_COMMIT"
+          git -C "$SOURCE_DIR" checkout --detach FETCH_HEAD
+
+          ACTUAL_COMMIT=$(git -C "$SOURCE_DIR" rev-parse HEAD)
+          if [ "$ACTUAL_COMMIT" != "$HYBRID_MOUNT_COMMIT" ]; then
+            echo "::error::Hybrid Mount commit mismatch: $ACTUAL_COMMIT"
+            exit 1
+          fi
+
+          cd "$KERNEL_ROOT"
+          "$SOURCE_DIR/module/vfs/setup.sh"
+          grep -qF 'source "fs/hybridmount/Kconfig"' fs/Kconfig
+          grep -qF 'obj-$(CONFIG_HYBRIDMOUNT) += hybridmount/' fs/Makefile
+
       # ── 配置内核选项 ─────────────────────────────────────────────
       - name: 配置内核选项
         run: |
@@ -319,6 +343,10 @@ jobs:
             echo "CONFIG_BUILD_ARM64_DT_OVERLAY=y" >> "$DEFCONFIG"
             echo "已添加 CONFIG_BUILD_ARM64_DT_OVERLAY=y"
           fi
+
+          # Hybrid Mount VFS is built into this kernel image.
+          sed -i '/^CONFIG_HYBRIDMOUNT=/d' "$DEFCONFIG"
+          echo "CONFIG_HYBRIDMOUNT=y" >> "$DEFCONFIG"
 
           VARIANT="${{ inputs.build_variant || 'resukisu' }}"
           if [ "${{ inputs.ksu_variant }}" = "reukisu" ]; then
@@ -349,7 +377,7 @@ jobs:
           echo "CONFIG_LOCALVERSION_AUTO=n" >> "$DEFCONFIG"
 
           echo "── 关键配置 ──"
-          grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG" || true
+          grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_HYBRIDMOUNT|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG" || true
 
       # ── 准备 AnyKernel3 ──────────────────────────────────────────
       # 官方 osm0sis 版 + 内嵌 anykernel.sh（取自 Y 大佬可用包:
@@ -449,6 +477,10 @@ jobs:
           make "${MAKE_ARGS[@]}" "${{ env.DEFCONFIG }}" 2>&1 | tee "$OUT_DIR/build.log"
           # make 在管道里时 set -e 看不到退出码, 用 PIPESTATUS 检查
           [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::defconfig 生成失败"; exit 1; }
+          grep -q '^CONFIG_HYBRIDMOUNT=y$' "$OUT_DIR/.config" || {
+            echo "::error::CONFIG_HYBRIDMOUNT=y missing from generated .config"
+            exit 1
+          }
 
           # [2/3] 编译
           echo ""; echo "[2/3] 编译内核..."
