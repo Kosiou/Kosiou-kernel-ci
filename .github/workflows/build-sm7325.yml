@@ -383,6 +383,14 @@ jobs:
           cd "$KERNEL_ROOT"
           bash "$SOURCE_DIR/Integrate/patches.sh"
 
+          # This 5.4 Binder UAPI lacks TF_UPDATE_TXN; keep upstream's optional coalescing path disabled.
+          if ! grep -q 'TF_UPDATE_TXN' "$KERNEL_ROOT/include/uapi/linux/android/binder.h"; then
+            sed -i '/#include <uapi\/linux\/android\/binder.h>/a\
+          #ifndef TF_UPDATE_TXN\
+          #define TF_UPDATE_TXN 0\
+          #endif' "$KERNEL_ROOT/drivers/android/binder.c"
+          fi
+
           # The upstream script can skip unsupported anchors without failing, so verify every integration point.
           test -f "$KERNEL_ROOT/drivers/rekernel/rekernel.c"
           grep -qF 'source "drivers/rekernel/Kconfig"' "$KERNEL_ROOT/drivers/Kconfig"
