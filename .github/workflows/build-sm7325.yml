@@ -66,18 +66,6 @@ jobs:
           echo "最新提交: $(git log -1 --format='%h %s')"
           echo "ROOT=$GITHUB_WORKSPACE/kernel" >> "$GITHUB_ENV"
 
-      - name: 清理仓库内固定 Re-Kernel 集成
-        run: |
-          set -euo pipefail
-          KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
-          INTEGRATION_COMMIT="976d2fcf9bd7e4e1ac9271ce1c2eeff02980281c"
-
-          # Revert the vendored integration before KSU and VFS modify shared build files.
-          git -C "$KERNEL_ROOT" fetch --no-tags --depth=2 origin "$INTEGRATION_COMMIT"
-          git -C "$KERNEL_ROOT" cat-file -e "${INTEGRATION_COMMIT}^{commit}"
-          git -C "$KERNEL_ROOT" revert --no-commit "$INTEGRATION_COMMIT"
-          echo "Removed pinned Re-Kernel integration from this build checkout."
-
       # ── 系统信息 ──────────────────────────────────────────────────
       - name: 显示系统信息
         run: |
