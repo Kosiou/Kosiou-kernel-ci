@@ -50,6 +50,8 @@ jobs:
     timeout-minutes: 90
     outputs:
       ksu_sha: ${{ steps.ksu_sha.outputs.ksu_sha }}
+      ksu_tag: ${{ steps.ksu_sha.outputs.ksu_tag }}
+      ksu_manager_url: ${{ steps.ksu_sha.outputs.ksu_manager_url }}
 
     steps:
       # ── 克隆内核源码 ───────────────────────────────────────────────
@@ -261,16 +263,26 @@ jobs:
           DRIVER_DIR="$KERNEL_ROOT/drivers"
 
           if [ "${{ inputs.ksu_variant }}" = "reukisu" ]; then
-            echo "克隆 BakaSU (原 ReSukiSU)..."
-            if [ ! -d "$KERNEL_ROOT/KernelSU" ]; then
-              # 固定 v4.2.0-rc3: 驱动版本 35171 与官方 release 管理器对齐,
-              # 且该版 manager_sign.h 期望的官方签名 = rc3 release APK 的证书
-              git clone --depth=1 --branch v4.2.0-rc3 https://github.com/Baka-SU/BakaSU.git "$KERNEL_ROOT/KernelSU"
-            fi
-            # 记录 BakaSU commit, manager job 用同一 commit 编配套管理器 APK
+            KSU_RELEASES=$(curl --fail --location --silent --show-error --retry 3 \
+              'https://api.github.com/repos/Baka-SU/BakaSU/releases?per_page=1')
+            KSU_TAG=$(jq -er '.[0].tag_name | select(type == "string" and length > 0)' <<< "$KSU_RELEASES")
+            KSU_MANAGER_URL=$(jq -er --arg tag "$KSU_TAG" '
+              [.[0].assets[]
+                | select(.name | contains($tag) and endswith("-arm64-v8a-release.apk"))
+                | .browser_download_url]
+              | if length == 1 then .[0] else error("expected one matching arm64 Manager APK") end
+            ' <<< "$KSU_RELEASES")
+            echo "Latest BakaSU release: $KSU_TAG"
+
+            git clone --depth=1 --branch "$KSU_TAG" \
+              https://github.com/Baka-SU/BakaSU.git "$KERNEL_ROOT/KernelSU"
+
+            # Keep the kernel driver and its signing-compatible Manager on one release.
             KSU_SHA=$(git -C "$KERNEL_ROOT/KernelSU" rev-parse HEAD)
             echo "ksu_sha=$KSU_SHA" >> "$GITHUB_OUTPUT"
-            echo "BakaSU commit: $KSU_SHA"
+            echo "ksu_tag=$KSU_TAG" >> "$GITHUB_OUTPUT"
+            echo "ksu_manager_url=$KSU_MANAGER_URL" >> "$GITHUB_OUTPUT"
+            echo "BakaSU release commit: $KSU_SHA"
             KSU_KERNEL_DIR="$KERNEL_ROOT/KernelSU/kernel"
 
             # 树里已提交符号链接 drivers/kernelsu -> ../KernelSU/kernel，
@@ -558,27 +570,30 @@ jobs:
           path: ${{ github.workspace }}/kernel/out/.config
           retention-days: 7
 
-  # ── 配套管理器: 内核已固定 v4.2.0-rc3, manager_sign.h 期望官方签名 ──
-  # 自编管理器用自签 keystore 不会被内核识别(apk_sign.c 校验证书 hash),
-  # 所以直接取官方 rc3 release APK (官方签名, 版本 35171 与驱动对齐)
+  # ── 配套管理器: 与内核使用同一 BakaSU release ──────────────────
+  # 自编管理器的签名不匹配内核；复用该 release 的官方 APK。
   manager:
-    name: "BakaSU-Manager (配套 ${{ inputs.ksu_variant }})"
+    name: "BakaSU-Manager (配套 ${{ needs.build.outputs.ksu_tag }})"
     runs-on: ubuntu-latest
     needs: build
     if: always() && needs.build.result == 'success' && inputs.ksu_variant == 'reukisu'
     timeout-minutes: 15
 
     steps:
-      - name: 下载官方 rc3 release 管理器
+      - name: 下载配套官方 release 管理器
         run: |
-          curl -sL --retry 3 -o manager.apk \
-            "https://github.com/Baka-SU/BakaSU/releases/download/v4.2.0-rc3/ReSukiSU_v4.2.0-rc3_35171-arm64-v8a-release.apk"
+          MANAGER_URL="${{ needs.build.outputs.ksu_manager_url }}"
+          if [ -z "$MANAGER_URL" ]; then
+            echo "::error::matching BakaSU Manager APK URL was not produced"
+            exit 1
+          fi
+          curl --fail --location --silent --show-error --retry 3 -o manager.apk "$MANAGER_URL"
           ls -lh manager.apk
-          cp manager.apk "$GITHUB_WORKSPACE/ReSukiSU-manager-v4.2.0-rc3-35171.apk"
+          cp manager.apk "$GITHUB_WORKSPACE/ReSukiSU-manager-${{ needs.build.outputs.ksu_tag }}.apk"
 
       - name: 上传管理器 APK
         uses: actions/upload-artifact@v6
         with:
-          name: manager-${{ inputs.build_variant || 'resukisu' }}-KSU
+          name: manager-${{ needs.build.outputs.ksu_tag }}-${{ inputs.build_variant || 'resukisu' }}-KSU
           path: ReSukiSU-manager-*.apk
           retention-days: 14
