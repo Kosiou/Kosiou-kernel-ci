@@ -37,7 +37,6 @@ env:
   KERNEL_REPO: ${{ github.event.inputs.kernel_repo || 'Kosiou/android_kernel_samsung_sm7325' }}
   KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'main' }}
   HYBRID_MOUNT_REPO: https://github.com/Hybrid-Mount/meta-hybrid_mount.git
-  HYBRID_MOUNT_COMMIT: 3f364e8251594120f60e4a4b8bf70082f67ed90b
   DEFCONFIG: vendor/gts7fewifi_eur_open_defconfig
   DEVICE_CODENAME: gts7fewifi
   LOCALVERSION_BASE: "-Kosiou"
@@ -309,17 +308,19 @@ jobs:
         run: |
           KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
           SOURCE_DIR="$RUNNER_TEMP/meta-hybrid_mount"
+          RELEASE_TAG=$(curl --fail --location --silent --show-error --retry 3 \
+            https://api.github.com/repos/Hybrid-Mount/meta-hybrid_mount/releases/latest \
+            | jq -er '.tag_name | select(type == "string" and length > 0)')
+          echo "Latest Hybrid Mount release: $RELEASE_TAG"
+
           mkdir -p "$SOURCE_DIR"
           git -C "$SOURCE_DIR" init
           git -C "$SOURCE_DIR" remote add origin "$HYBRID_MOUNT_REPO"
-          git -C "$SOURCE_DIR" fetch --depth=1 origin "$HYBRID_MOUNT_COMMIT"
+          git -C "$SOURCE_DIR" fetch --depth=1 origin "refs/tags/$RELEASE_TAG"
           git -C "$SOURCE_DIR" checkout --detach FETCH_HEAD
 
           ACTUAL_COMMIT=$(git -C "$SOURCE_DIR" rev-parse HEAD)
-          if [ "$ACTUAL_COMMIT" != "$HYBRID_MOUNT_COMMIT" ]; then
-            echo "::error::Hybrid Mount commit mismatch: $ACTUAL_COMMIT"
-            exit 1
-          fi
+          echo "Hybrid Mount release commit: $ACTUAL_COMMIT"
 
           cd "$KERNEL_ROOT"
           "$SOURCE_DIR/module/vfs/setup.sh"
