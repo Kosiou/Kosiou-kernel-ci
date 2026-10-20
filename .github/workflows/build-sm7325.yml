@@ -37,6 +37,7 @@ env:
   KERNEL_REPO: ${{ github.event.inputs.kernel_repo || 'Kosiou/android_kernel_samsung_sm7325' }}
   KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'main' }}
   HYBRID_MOUNT_REPO: https://github.com/Hybrid-Mount/meta-hybrid_mount.git
+  REKERNEL_REPO: Sakion-Team/Re-Kernel
   DEFCONFIG: vendor/gts7fewifi_eur_open_defconfig
   DEVICE_CODENAME: gts7fewifi
   LOCALVERSION_BASE: "-Kosiou"
@@ -64,6 +65,18 @@ jobs:
           echo "分支: $(git rev-parse --abbrev-ref HEAD)"
           echo "最新提交: $(git log -1 --format='%h %s')"
           echo "ROOT=$GITHUB_WORKSPACE/kernel" >> "$GITHUB_ENV"
+
+      - name: 清理仓库内固定 Re-Kernel 集成
+        run: |
+          set -euo pipefail
+          KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
+          INTEGRATION_COMMIT="976d2fcf9bd7e4e1ac9271ce1c2eeff02980281c"
+
+          # Revert the vendored integration before KSU and VFS modify shared build files.
+          git -C "$KERNEL_ROOT" fetch --no-tags --depth=2 origin "$INTEGRATION_COMMIT"
+          git -C "$KERNEL_ROOT" cat-file -e "${INTEGRATION_COMMIT}^{commit}"
+          git -C "$KERNEL_ROOT" revert --no-commit "$INTEGRATION_COMMIT"
+          echo "Removed pinned Re-Kernel integration from this build checkout."
 
       # ── 系统信息 ──────────────────────────────────────────────────
       - name: 显示系统信息
@@ -339,6 +352,49 @@ jobs:
           grep -qF 'source "fs/hybridmount/Kconfig"' fs/Kconfig
           grep -qF 'obj-$(CONFIG_HYBRIDMOUNT) += hybridmount/' fs/Makefile
 
+      # ── 集成最新官方 Re-Kernel ────────────────────────────────────
+      - name: 集成 Re-Kernel
+        id: rekernel
+        run: |
+          set -euo pipefail
+          KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
+          SOURCE_DIR="$RUNNER_TEMP/Re-Kernel"
+          DEFCONFIG="$KERNEL_ROOT/arch/arm64/configs/vendor/gts7fewifi_eur_open_defconfig"
+
+          RELEASE=$(curl --fail --location --silent --show-error --retry 3 \
+            "https://api.github.com/repos/${REKERNEL_REPO}/releases/latest")
+          RELEASE_TAG=$(jq -er '.tag_name | select(type == "string" and length > 0)' <<< "$RELEASE")
+          echo "Latest Re-Kernel release: $RELEASE_TAG"
+
+          git clone --depth=1 --branch "$RELEASE_TAG" \
+            "https://github.com/${REKERNEL_REPO}.git" "$SOURCE_DIR"
+          RELEASE_SHA=$(git -C "$SOURCE_DIR" rev-parse HEAD)
+          echo "Re-Kernel release commit: $RELEASE_SHA"
+
+          # The upstream script targets generic ARM64 defconfig; this device builds its vendor defconfig.
+          if ! grep -qF 'arch/arm64/configs/defconfig' "$SOURCE_DIR/Integrate/patches.sh"; then
+            echo "::error::upstream Re-Kernel integration script no longer has the expected defconfig target"
+            exit 1
+          fi
+          sed -i \
+            's|arch/arm64/configs/defconfig|arch/arm64/configs/vendor/gts7fewifi_eur_open_defconfig|' \
+            "$SOURCE_DIR/Integrate/patches.sh"
+
+          cd "$KERNEL_ROOT"
+          bash "$SOURCE_DIR/Integrate/patches.sh"
+
+          # The upstream script can skip unsupported anchors without failing, so verify every integration point.
+          test -f "$KERNEL_ROOT/drivers/rekernel/rekernel.c"
+          grep -qF 'source "drivers/rekernel/Kconfig"' "$KERNEL_ROOT/drivers/Kconfig"
+          grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$KERNEL_ROOT/drivers/Makefile"
+          grep -qF 'rekernel_binder_transaction(reply, t, target_node, tr)' "$KERNEL_ROOT/drivers/android/binder.c"
+          grep -qF 'rekernel_report(SIGNAL' "$KERNEL_ROOT/kernel/signal.c"
+          grep -q '^CONFIG_REKERNEL=y$' "$DEFCONFIG"
+          grep -q '^CONFIG_REKERNEL_NETWORK=n$' "$DEFCONFIG"
+
+          echo "rekernel_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "rekernel_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+
       # ── 配置内核选项 ─────────────────────────────────────────────
       - name: 配置内核选项
         run: |
@@ -459,6 +515,7 @@ jobs:
           echo " Device:    ${{ env.DEVICE_CODENAME }}"
           echo " Defconfig: ${{ env.DEFCONFIG }}"
           echo " Variant:   $VARIANT (ksu: ${{ inputs.ksu_variant }})"
+          echo " Re-Kernel: ${{ steps.rekernel.outputs.rekernel_tag }} (${{ steps.rekernel.outputs.rekernel_sha }})"
           echo " Version:   $LOCALVERSION"
           echo " CC:        $CC"
           echo " CROSS:     $CROSS_COMPILE"
@@ -492,6 +549,10 @@ jobs:
           [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::defconfig 生成失败"; exit 1; }
           grep -q '^CONFIG_HYBRIDMOUNT=y$' "$OUT_DIR/.config" || {
             echo "::error::CONFIG_HYBRIDMOUNT=y missing from generated .config"
+            exit 1
+          }
+          grep -q '^CONFIG_REKERNEL=y$' "$OUT_DIR/.config" || {
+            echo "::error::CONFIG_REKERNEL=y missing from generated .config"
             exit 1
           }
 
@@ -532,7 +593,7 @@ jobs:
 
           TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
           KSU_TAG="${{ inputs.ksu_variant == 'reukisu' && 'KSU' || 'noKSU' }}"
-          ZIP_NAME="TabS7FE_Kernel-${VARIANT}-${KSU_TAG}-${TIMESTAMP}-GitHub.zip"
+          ZIP_NAME="TabS7FE_Kernel-${VARIANT}-${KSU_TAG}-ReKernel-${{ steps.rekernel.outputs.rekernel_tag }}-${TIMESTAMP}-GitHub.zip"
           (cd "$AK3_DIR" && zip -r9 "$OUT_DIR/$ZIP_NAME" . -x '.git*' '*.gitignore' 'README*' '*placeholder')
 
           echo ""
@@ -550,7 +611,7 @@ jobs:
       - name: 上传内核 zip
         uses: actions/upload-artifact@v6
         with:
-          name: kernel-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant == 'reukisu' && 'KSU' || 'noKSU' }}
+          name: kernel-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant == 'reukisu' && 'KSU' || 'noKSU' }}-ReKernel-${{ steps.rekernel.outputs.rekernel_tag }}
           path: ${{ steps.compile.outputs.ZIP_PATH }}
           retention-days: 14
 
