@@ -26,7 +26,7 @@ on:
         type: string
         default: "Kosiou/android_kernel_samsung_sm7325"
       kernel_branch:
-        description: "内核源码分支"
+        description: "内核源码分支（Pixie 已并入 main，内核合并提交 3aa99b6）"
         type: string
         default: "main"
 
