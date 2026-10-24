@@ -567,6 +567,8 @@ jobs:
         with:
           name: config-resukisu-KSU
           path: ${{ github.workspace }}/kernel/out/.config
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 7
 
   # ── 配套管理器: 与内核使用同一 BakaSU release ──────────────────
