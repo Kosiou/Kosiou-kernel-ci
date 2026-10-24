@@ -3,39 +3,18 @@ name: build-sm7325
 on:
   workflow_dispatch:
     inputs:
-      ksu_variant:
-        description: "KernelSU 变体"
-        type: choice
-        options:
-          - reukisu
-          - none
-        default: reukisu
-      build_variant:
-        description: "构建变体（resukisu=KSU 内建, lkm=KSU 编为模块）"
-        type: choice
-        options:
-          - resukisu
-          - lkm
-        default: resukisu
       use_ccache:
         description: "启用 ccache"
         type: boolean
         default: true
-      kernel_repo:
-        description: "内核源码仓库地址（GitHub 格式 owner/repo）"
-        type: string
-        default: "Kosiou/android_kernel_samsung_sm7325"
-      kernel_branch:
-        description: "内核源码分支（Pixie 已并入 main，内核合并提交 3aa99b6）"
-        type: string
-        default: "main"
-
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: sm7325-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  KERNEL_REPO: ${{ github.event.inputs.kernel_repo || 'Kosiou/android_kernel_samsung_sm7325' }}
-  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'main' }}
   HYBRID_MOUNT_REPO: https://github.com/Hybrid-Mount/meta-hybrid_mount.git
   REKERNEL_REPO: Sakion-Team/Re-Kernel
   DEFCONFIG: vendor/gts7fewifi_eur_open_defconfig
@@ -46,7 +25,7 @@ env:
 
 jobs:
   build:
-    name: "SM7325-${{ inputs.build_variant || 'resukisu' }}${{ inputs.ksu_variant == 'reukisu' && (inputs.build_variant == 'lkm' && '-KSU-lkm' || '-KSU') || '-noKSU' }}"
+    name: "SM7325-KSU"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
@@ -57,13 +36,19 @@ jobs:
     steps:
       # ── 克隆内核源码 ───────────────────────────────────────────────
       - name: 克隆内核源码
+        uses: actions/checkout@v4
+        with:
+          repository: Kosiou/android_kernel_samsung_sm7325
+          ref: main
+          path: kernel
+          fetch-depth: 1
+
+      - name: 记录源码版本
+        working-directory: kernel
         run: |
-          REPO_URL="https://github.com/${{ env.KERNEL_REPO }}.git"
-          echo "克隆: $REPO_URL (分支: ${{ env.KERNEL_BRANCH }})"
-          git clone --depth=1 -b "${{ env.KERNEL_BRANCH }}" "$REPO_URL" "$GITHUB_WORKSPACE/kernel"
-          cd "$GITHUB_WORKSPACE/kernel"
-          echo "分支: $(git rev-parse --abbrev-ref HEAD)"
-          echo "最新提交: $(git log -1 --format='%h %s')"
+          echo "分支/引用: main"
+          echo "提交: $(git rev-parse HEAD)"
+          echo "摘要: $(git log -1 --format='%h %s')"
           echo "ROOT=$GITHUB_WORKSPACE/kernel" >> "$GITHUB_ENV"
 
       # ── 系统信息 ──────────────────────────────────────────────────
@@ -78,8 +63,8 @@ jobs:
       - name: 安装编译依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y bison flex libelf-dev dwarves cpio unzip zip binutils \
-            bc libssl-dev python3 ccache git
+          sudo apt-get install -y bison flex libelf-dev libdw-dev dwarves cpio unzip zip \
+            binutils bc libssl-dev python3 ccache git curl jq lld llvm rsync
 
       # ── GNU Make 4.3（5.4 内核要求 < 4.4）────────────────────────
       # ubuntu-latest (24.04) 自带 4.3, 仅在系统 make >= 4.4 时才编译
@@ -119,13 +104,15 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          # 固定 key: hashFiles 在 workflow 解析期求值, kernel/ 尚未克隆, 恒为空
-          # defconfig 变化不会使缓存失效 — 由 restore-keys 兜底, 手动清缓存可走
-          # Actions → Caches 页面删除
-          key: sm7325-ccache-${{ inputs.build_variant }}-${{ inputs.ksu_variant }}
+          key: sm7325-ccache-${{ runner.os }}-${{ hashFiles('kernel/Makefile', 'kernel/arch/arm64/configs/vendor/gts7fewifi_eur_open_defconfig') }}-KSU
           restore-keys: |
-            sm7325-ccache-${{ inputs.build_variant }}-
-            sm7325-ccache-
+            sm7325-ccache-${{ runner.os }}-
+
+      - name: 恢复工具链缓存
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.TOOLCHAIN_BASE }}
+          key: sm7325-toolchains-clang-r416183b-arm-gnu-14.2
 
       # ── 下载工具链 ────────────────────────────────────────────────
       # 来源: https://github.com/ravindu644/Android-Kernel-Tutorials
@@ -213,10 +200,8 @@ jobs:
           # 找 clang 可执行文件
           if [ -x "$CLANG_DIR/bin/clang" ]; then
             CLANG="$CLANG_DIR/bin/clang"
-            CLANG12="$CLANG_DIR/bin/clang-12"
           elif ls "$CLANG_DIR/bin"/clang-12* &>/dev/null; then
-            CLANG12=$(ls "$CLANG_DIR/bin"/clang-12* | head -1)
-            CLANG="$CLANG12"
+            CLANG=$(ls "$CLANG_DIR/bin"/clang-12* | head -1)
           else
             echo "::error::找不到 clang 可执行文件: $CLANG_DIR"
             ls -la "$CLANG_DIR/bin/" 2>/dev/null | head -20
@@ -234,10 +219,9 @@ jobs:
 
           # 建立 aarch64 前缀链接
           ln -sf "$CLANG" "$TOOLCHAIN_BIN/aarch64-linux-gnu-gcc"
-          ln -sf "$CLANG" "$TOOLCHAIN_BIN/aarch64-linux-gnu-g++"
           ln -sf "$CLANG" "$TOOLCHAIN_BIN/cc"
           ln -sf "$CLANG" "$TOOLCHAIN_BIN/gcc"
-          ln -sf "$CLANG12" "$TOOLCHAIN_BIN/g++" 2>/dev/null || ln -sf "$CLANG" "$TOOLCHAIN_BIN/g++"
+          ln -sf "$CLANG" "$TOOLCHAIN_BIN/g++"
 
           for tool in ld ar nm objcopy objdump strip; do
             src="$CLANG_DIR/bin/llvm-${tool}"
@@ -254,67 +238,43 @@ jobs:
           ls -la "$TOOLCHAIN_BIN"
 
       # ── 集成 KernelSU (BakaSU, 原 ReSukiSU) ──────────────────────
-      # reukisu:  克隆 BakaSU 并链接为内建/LKM 驱动
-      # none:     内核树 drivers/Kconfig 已 source drivers/kernelsu/Kconfig
-      #           (符号链接悬空时 Kconfig 直接 exit(1)), 必须摘掉这两处引用
+      # 固定克隆 BakaSU 并以 CONFIG_KSU=y 编入内核。
       - name: 集成 KernelSU (BakaSU)
         id: ksu_sha
         run: |
           KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
           DRIVER_DIR="$KERNEL_ROOT/drivers"
 
-          if [ "${{ inputs.ksu_variant }}" = "reukisu" ]; then
-            KSU_RELEASES=$(curl --fail --location --silent --show-error --retry 3 \
-              'https://api.github.com/repos/Baka-SU/BakaSU/releases?per_page=1')
-            KSU_TAG=$(jq -er '.[0].tag_name | select(type == "string" and length > 0)' <<< "$KSU_RELEASES")
-            KSU_MANAGER_URL=$(jq -er --arg tag "$KSU_TAG" '
-              [.[0].assets[]
-                | select(.name | contains($tag) and endswith("-arm64-v8a-release.apk"))
-                | .browser_download_url]
-              | if length == 1 then .[0] else error("expected one matching arm64 Manager APK") end
-            ' <<< "$KSU_RELEASES")
-            echo "Latest BakaSU release: $KSU_TAG"
+          # KSU is mandatory for this kernel; always integrate the pinned release.
+          KSU_RELEASES=$(curl --fail --location --silent --show-error --retry 3 \
+            'https://api.github.com/repos/Baka-SU/BakaSU/releases?per_page=1')
+          KSU_TAG=$(jq -er '.[0].tag_name | select(type == "string" and length > 0)' <<< "$KSU_RELEASES")
+          KSU_MANAGER_URL=$(jq -er --arg tag "$KSU_TAG" '
+            [.[0].assets[]
+              | select(.name | contains($tag) and endswith("-arm64-v8a-release.apk"))
+              | .browser_download_url]
+            | if length == 1 then .[0] else error("expected one matching arm64 Manager APK") end
+          ' <<< "$KSU_RELEASES")
+          echo "Latest BakaSU release: $KSU_TAG"
 
-            git clone --depth=1 --branch "$KSU_TAG" \
-              https://github.com/Baka-SU/BakaSU.git "$KERNEL_ROOT/KernelSU"
+          git clone --depth=1 --branch "$KSU_TAG" \
+            https://github.com/Baka-SU/BakaSU.git "$KERNEL_ROOT/KernelSU"
 
-            # Keep the kernel driver and its signing-compatible Manager on one release.
-            KSU_SHA=$(git -C "$KERNEL_ROOT/KernelSU" rev-parse HEAD)
-            echo "ksu_sha=$KSU_SHA" >> "$GITHUB_OUTPUT"
-            echo "ksu_tag=$KSU_TAG" >> "$GITHUB_OUTPUT"
-            echo "ksu_manager_url=$KSU_MANAGER_URL" >> "$GITHUB_OUTPUT"
-            echo "BakaSU release commit: $KSU_SHA"
-            KSU_KERNEL_DIR="$KERNEL_ROOT/KernelSU/kernel"
+          # Keep the kernel driver and its signing-compatible Manager on one release.
+          KSU_SHA=$(git -C "$KERNEL_ROOT/KernelSU" rev-parse HEAD)
+          echo "ksu_sha=$KSU_SHA" >> "$GITHUB_OUTPUT"
+          echo "ksu_tag=$KSU_TAG" >> "$GITHUB_OUTPUT"
+          echo "ksu_manager_url=$KSU_MANAGER_URL" >> "$GITHUB_OUTPUT"
+          echo "BakaSU release commit: $KSU_SHA"
 
-            # 树里已提交符号链接 drivers/kernelsu -> ../KernelSU/kernel，
-            # 仅在缺失时重建（注意相对层数：从 drivers/ 出发一层）
-            if [ ! -L "$DRIVER_DIR/kernelsu" ]; then
-              ln -sfn "../KernelSU/kernel" "$DRIVER_DIR/kernelsu"
-              echo "已创建 drivers/kernelsu -> ../KernelSU/kernel"
-            else
-              echo "复用树内链接: $(readlink "$DRIVER_DIR/kernelsu")"
-            fi
+          # KSU 集成入口由内核仓库维护；CI 只提供外部源码并校验，不改动内核树。
+          test -L "$DRIVER_DIR/kernelsu"
+          test -e "$DRIVER_DIR/kernelsu/Kconfig"
+          grep -q "source \"drivers/kernelsu/Kconfig\"" "$DRIVER_DIR/Kconfig"
+          grep -q "obj-\$(CONFIG_KSU) += kernelsu/" "$DRIVER_DIR/Makefile"
+          echo "KernelSU 集成入口: $(readlink "$DRIVER_DIR/kernelsu")"
 
-            # 确保 Makefile 包含 KSU
-            if ! grep -q "kernelsu" "$DRIVER_DIR/Makefile"; then
-              echo '' >> "$DRIVER_DIR/Makefile"
-              echo 'obj-$(CONFIG_KSU) += kernelsu/'
-              echo "已添加 KSU 到 drivers/Makefile"
-            fi
-
-            # 确保 Kconfig 包含 KSU
-            if ! grep -q "drivers/kernelsu/Kconfig" "$DRIVER_DIR/Kconfig"; then
-              sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
-              echo "已添加 KSU 到 drivers/Kconfig"
-            fi
-
-            echo "KernelSU 集成完成"
-          else
-            echo "ksu_variant=none: 摘除 drivers 树里的 KSU 引用（避免悬空 source 导致 Kconfig 退出）"
-            sed -i '/source "drivers\/kernelsu\/Kconfig"/d' "$DRIVER_DIR/Kconfig"
-            sed -i '/obj-$(CONFIG_KSU) += kernelsu\//d' "$DRIVER_DIR/Makefile"
-            echo "已摘除 KSU 引用"
-          fi
+          echo "KernelSU 集成完成"
 
       # ── 集成 Hybrid Mount VFS ────────────────────────────────────
       - name: 集成 Hybrid Mount VFS
@@ -397,60 +357,12 @@ jobs:
           KERNEL_ROOT="$GITHUB_WORKSPACE/kernel"
           DEFCONFIG="$KERNEL_ROOT/arch/arm64/configs/vendor/gts7fewifi_eur_open_defconfig"
 
-          # USER_NS 已固化进 defconfig; 此处仅作兜底（幂等）
-          if ! grep -q "^CONFIG_USER_NS=y" "$DEFCONFIG"; then
-            sed -i '/^CONFIG_NAMESPACES=y$/a CONFIG_USER_NS=y' "$DEFCONFIG"
-            echo "已添加 CONFIG_USER_NS=y"
-          fi
-
-          # 确保生成 ARM64 device tree overlay
-          if ! grep -q "^CONFIG_BUILD_ARM64_DT_OVERLAY=y" "$DEFCONFIG"; then
-            echo "CONFIG_BUILD_ARM64_DT_OVERLAY=y" >> "$DEFCONFIG"
-            echo "已添加 CONFIG_BUILD_ARM64_DT_OVERLAY=y"
-          fi
-
-          # Enable multi-generation LRU for this kernel build.
-          for opt in CONFIG_LRU_GEN=y CONFIG_LRU_GEN_ENABLED=y; do
-            cfg="${opt%%=*}"
-            val="${opt#*=}"
-            sed -i "/^${cfg}=/d" "$DEFCONFIG"
-            echo "$cfg=$val" >> "$DEFCONFIG"
-          done
-
           # Hybrid Mount VFS is built into this kernel image.
           sed -i '/^CONFIG_HYBRIDMOUNT=/d' "$DEFCONFIG"
           echo "CONFIG_HYBRIDMOUNT=y" >> "$DEFCONFIG"
 
-          VARIANT="${{ inputs.build_variant || 'resukisu' }}"
-          if [ "${{ inputs.ksu_variant }}" = "reukisu" ]; then
-            # KSU 主开关: resukisu 内建(=y), lkm 编为模块(=m)
-            KSU_VAL="y"
-            [ "$VARIANT" = "lkm" ] && KSU_VAL="m"
-            for opt in \
-              "CONFIG_KSU=${KSU_VAL}" \
-              "CONFIG_KSU_MANUAL_HOOK=y" \
-              "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" \
-              "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" \
-              "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"; do
-              cfg="${opt%%=*}"
-              val="${opt#*=}"
-              # 先删除同符号旧行再追加, 避免重复/冲突
-              sed -i "/^${cfg}=/d" "$DEFCONFIG"
-              echo "$cfg=$val" >> "$DEFCONFIG"
-            done
-            echo "KSU 变体: $VARIANT → CONFIG_KSU=${KSU_VAL}"
-          else
-            # 无 KSU: 清掉 KSU 配置, 防止残留 =y 引用已摘除的代码
-            sed -i '/^CONFIG_KSU/d' "$DEFCONFIG"
-            echo "已清除全部 CONFIG_KSU* 配置"
-          fi
-
-          # 禁止自动追加 Git dirty/version 后缀，避免 utsrelease 超过 64 字符
-          sed -i '/^CONFIG_LOCALVERSION_AUTO=/d' "$DEFCONFIG"
-          echo "CONFIG_LOCALVERSION_AUTO=n" >> "$DEFCONFIG"
-
           echo "── 关键配置 ──"
-          grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_HYBRIDMOUNT|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG" || true
+          grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_HYBRIDMOUNT|CONFIG_LRU_GEN|CONFIG_BUILD_ARM64_DT_OVERLAY|CONFIG_LOCALVERSION_AUTO|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG" || true
 
       # ── 准备 AnyKernel3 ──────────────────────────────────────────
       # 官方 osm0sis 版 + 内嵌 anykernel.sh（取自 Y 大佬可用包:
@@ -499,7 +411,7 @@ jobs:
 
           # ccache: CC 经 export + make 命令行 DISABLE_WRAPPER=1 CC="$CC"
           # 传入。wrapper 被禁用后不会拦截 warning, KCFLAGS 保留为双保险
-          VARIANT="${{ inputs.build_variant || 'resukisu' }}"
+          VARIANT="resukisu"
           if [ "${{ inputs.use_ccache }}" = "true" ] && command -v ccache &>/dev/null; then
             export CC="ccache clang"
             echo "ccache 已启用: CC=$CC"
@@ -518,7 +430,7 @@ jobs:
           echo "=============================================="
           echo " Device:    ${{ env.DEVICE_CODENAME }}"
           echo " Defconfig: ${{ env.DEFCONFIG }}"
-          echo " Variant:   $VARIANT (ksu: ${{ inputs.ksu_variant }})"
+          echo " Variant:   $VARIANT (KSU built-in)"
           echo " Re-Kernel: ${{ steps.rekernel.outputs.rekernel_tag }} (${{ steps.rekernel.outputs.rekernel_sha }})"
           echo " Version:   $LOCALVERSION"
           echo " CC:        $CC"
@@ -596,17 +508,20 @@ jobs:
           find "$OUT_DIR/arch/arm64/boot/dts" -name "*.dtb" -exec cp {} "$AK3_DIR/dtb/" \; 2>/dev/null && echo "  ✓ DTB" || true
           [ -f "$OUT_DIR/arch/arm64/boot/dtbo.img" ] && cp "$OUT_DIR/arch/arm64/boot/dtbo.img" "$AK3_DIR/" && echo "  ✓ DTBO" || true
 
-          # 收集模块
-          if ls "$OUT_DIR"/*.ko 2>/dev/null | head -1 > /dev/null; then
+          # 收集模块；模块通常位于 drivers/、fs/ 等嵌套目录。
+          if find "$OUT_DIR" -type f -name '*.ko' -print -quit | grep -q .; then
             mkdir -p "$AK3_DIR/modules"
             find "$OUT_DIR" -name "*.ko" -not -path "*/vendor/*" -exec cp {} "$AK3_DIR/modules/" \; 2>/dev/null
             echo "  ✓ Modules"
           fi
 
+          # 让刷机包中的显示名称与本次构建一致，避免保留模板值。
+          sed -i "s/^kernel.string=.*/kernel.string=TabS7FE Kernel ${LOCALVERSION}/" "$AK3_DIR/anykernel.sh"
+
           TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
-          KSU_TAG="${{ inputs.ksu_variant == 'reukisu' && 'KSU' || 'noKSU' }}"
-          ZIP_NAME="TabS7FE_Kernel-${VARIANT}-${KSU_TAG}-ReKernel-${{ steps.rekernel.outputs.rekernel_tag }}-${TIMESTAMP}-GitHub.zip"
+          ZIP_NAME="TabS7FE_Kernel-${VARIANT}-KSU-ReKernel-${{ steps.rekernel.outputs.rekernel_tag }}-${TIMESTAMP}-GitHub.zip"
           (cd "$AK3_DIR" && zip -r9 "$OUT_DIR/$ZIP_NAME" . -x '.git*' '*.gitignore' 'README*' '*placeholder')
+          sha256sum "$OUT_DIR/$ZIP_NAME" > "$OUT_DIR/$ZIP_NAME.sha256"
 
           echo ""
           echo "=============================================="
@@ -623,15 +538,22 @@ jobs:
       - name: 上传内核 zip
         uses: actions/upload-artifact@v6
         with:
-          name: kernel-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant == 'reukisu' && 'KSU' || 'noKSU' }}-ReKernel-${{ steps.rekernel.outputs.rekernel_tag }}
+          name: kernel-resukisu-KSU-ReKernel-${{ steps.rekernel.outputs.rekernel_tag }}
           path: ${{ steps.compile.outputs.ZIP_PATH }}
+          retention-days: 14
+
+      - name: 上传校验和
+        uses: actions/upload-artifact@v6
+        with:
+          name: checksum-resukisu-KSU
+          path: ${{ steps.compile.outputs.ZIP_PATH }}.sha256
           retention-days: 14
 
       - name: 上传构建日志（失败时调试用）
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: buildlog-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant }}
+          name: buildlog-resukisu-KSU
           path: ${{ github.workspace }}/kernel/out/build.log
           retention-days: 7
 
@@ -639,7 +561,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: config-${{ inputs.build_variant || 'resukisu' }}-${{ inputs.ksu_variant }}
+          name: config-resukisu-KSU
           path: ${{ github.workspace }}/kernel/out/.config
           retention-days: 7
 
@@ -649,7 +571,7 @@ jobs:
     name: "BakaSU-Manager (配套 ${{ needs.build.outputs.ksu_tag }})"
     runs-on: ubuntu-latest
     needs: build
-    if: always() && needs.build.result == 'success' && inputs.ksu_variant == 'reukisu'
+    if: always() && needs.build.result == 'success'
     timeout-minutes: 15
 
     steps:
@@ -667,6 +589,6 @@ jobs:
       - name: 上传管理器 APK
         uses: actions/upload-artifact@v6
         with:
-          name: manager-${{ needs.build.outputs.ksu_tag }}-${{ inputs.build_variant || 'resukisu' }}-KSU
+          name: manager-${{ needs.build.outputs.ksu_tag }}-resukisu-KSU
           path: ReSukiSU-manager-*.apk
           retention-days: 14
