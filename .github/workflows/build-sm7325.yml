@@ -409,6 +409,14 @@ jobs:
             echo "已添加 CONFIG_BUILD_ARM64_DT_OVERLAY=y"
           fi
 
+          # Enable multi-generation LRU for this kernel build.
+          for opt in CONFIG_LRU_GEN=y CONFIG_LRU_GEN_ENABLED=y; do
+            cfg="${opt%%=*}"
+            val="${opt#*=}"
+            sed -i "/^${cfg}=/d" "$DEFCONFIG"
+            echo "$cfg=$val" >> "$DEFCONFIG"
+          done
+
           # Hybrid Mount VFS is built into this kernel image.
           sed -i '/^CONFIG_HYBRIDMOUNT=/d' "$DEFCONFIG"
           echo "CONFIG_HYBRIDMOUNT=y" >> "$DEFCONFIG"
@@ -545,6 +553,14 @@ jobs:
           [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::defconfig 生成失败"; exit 1; }
           grep -q '^CONFIG_HYBRIDMOUNT=y$' "$OUT_DIR/.config" || {
             echo "::error::CONFIG_HYBRIDMOUNT=y missing from generated .config"
+            exit 1
+          }
+          grep -q '^CONFIG_LRU_GEN=y$' "$OUT_DIR/.config" || {
+            echo "::error::CONFIG_LRU_GEN=y missing from generated .config"
+            exit 1
+          }
+          grep -q '^CONFIG_LRU_GEN_ENABLED=y$' "$OUT_DIR/.config" || {
+            echo "::error::CONFIG_LRU_GEN_ENABLED=y missing from generated .config"
             exit 1
           }
           grep -q '^CONFIG_REKERNEL=y$' "$OUT_DIR/.config" || {
