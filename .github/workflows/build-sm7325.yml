@@ -361,8 +361,12 @@ jobs:
           sed -i '/^CONFIG_HYBRIDMOUNT=/d' "$DEFCONFIG"
           echo "CONFIG_HYBRIDMOUNT=y" >> "$DEFCONFIG"
 
+          # Re-Kernel's official integration script owns these settings.
+          grep -q '^CONFIG_REKERNEL=y$' "$DEFCONFIG"
+          grep -q '^CONFIG_REKERNEL_NETWORK=n$' "$DEFCONFIG"
+
           echo "── 关键配置 ──"
-          grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_HYBRIDMOUNT|CONFIG_LRU_GEN|CONFIG_BUILD_ARM64_DT_OVERLAY|CONFIG_LOCALVERSION_AUTO|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG" || true
+          grep -E "CONFIG_USER_NS|CONFIG_KSU|CONFIG_HYBRIDMOUNT|CONFIG_REKERNEL|CONFIG_LRU_GEN|CONFIG_BUILD_ARM64_DT_OVERLAY|CONFIG_LOCALVERSION_AUTO|CONFIG_NAMESPACES|CONFIG_PID_NS|CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE" "$DEFCONFIG" || true
 
       # ── 准备 AnyKernel3 ──────────────────────────────────────────
       # 官方 osm0sis 版 + 内嵌 anykernel.sh（取自 Y 大佬可用包:
